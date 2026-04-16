@@ -102,16 +102,39 @@ async function getScriptableDb(dbhan) {
 const drivers = driverBases.map((driverBase) => ({
   ...driverBase,
   analyserClass: Analyser,
-  async connect({ server, port, user, password, database, useDatabaseUrl, databaseUrl, ssl, useSshTunnel }) {
+  getSSHTunnelMode(connection) {
+    if (connection.useDatabaseUrl && connection.databaseUrl && connection.databaseUrl.startsWith('mongodb+srv://')) {
+      return 'socks';
+    }
+    return 'forward';
+  },
+  async connect({
+    server,
+    port,
+    user,
+    password,
+    database,
+    useDatabaseUrl,
+    databaseUrl,
+    ssl,
+    useSshTunnel,
+    sshSocksProxyHost,
+    sshSocksProxyPort,
+  }) {
     let mongoUrl;
 
     if (useDatabaseUrl) {
-      if (useSshTunnel) {
-        // change port to ssh tunnel port
+      if (useSshTunnel && !sshSocksProxyHost) {
+        if (databaseUrl.startsWith('mongodb+srv://')) {
+          throw new Error('mongodb+srv:// URLs require SOCKS proxy mode for SSH tunneling');
+        }
+        // change port to ssh tunnel port (standard mongodb:// URLs)
         const url = new URL(databaseUrl);
         url.port = port;
         mongoUrl = url.href;
       } else {
+        // For mongodb+srv:// with SSH, the SOCKS proxy handles routing
+        // so we keep the original URL intact
         mongoUrl = databaseUrl;
       }
     } else {
@@ -123,6 +146,12 @@ const drivers = driverBases.map((driverBase) => ({
     const options = {
       // useUnifiedTopology: true, // this options has no longer effect
     };
+
+    if (sshSocksProxyHost) {
+      options.proxyHost = sshSocksProxyHost;
+      options.proxyPort = sshSocksProxyPort;
+    }
+
     if (ssl) {
       options.tls = true;
       options.tlsCAFile = ssl.sslCaFile;
