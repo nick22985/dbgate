@@ -254,6 +254,7 @@ class SSHConnection {
         .createServer(socket => {
           this._handleSocks5(socket, connection, options);
         })
+        .on('error', reject)
         .listen(options.fromPort, this.options.bindHost, () => {
           return resolve();
         });
@@ -265,6 +266,13 @@ class SSHConnection {
 
     socket.once('data', greeting => {
       if (!greeting || greeting.length < 2 || greeting[0] !== 0x05) {
+        socket.destroy();
+        return;
+      }
+      const nmethods = greeting[1];
+      const methods = greeting.slice(2, 2 + nmethods);
+      if (!methods.includes(0x00)) {
+        socket.write(Buffer.from([0x05, 0xff]));
         socket.destroy();
         return;
       }
