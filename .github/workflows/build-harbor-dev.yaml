@@ -1,0 +1,61 @@
+name: Docker image (Harbor, dev)
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harbor-dev
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: kube-4-dbgate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Enable yarn
+        run: corepack enable
+
+      - name: adjustPackageJson
+        run: node adjustPackageJson --community
+
+      - name: yarn install
+        run: yarn install
+
+      - name: setCurrentVersion
+        run: yarn setCurrentVersion
+
+      - name: Prepare docker image
+        run: yarn run prepare:docker
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Log in to private Harbor
+        run: |
+          echo "::add-mask::$HARBOR_PASSWORD"
+          echo "$HARBOR_PASSWORD" | docker login registry.nick22985.com \
+            --username "$HARBOR_USERNAME" --password-stdin
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          context: ./docker
+          platforms: linux/amd64
+          tags: |
+            registry.nick22985.com/dbgate/dbgate:dev
+            registry.nick22985.com/dbgate/dbgate:dev-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
