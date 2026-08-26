@@ -133,7 +133,7 @@
   import openNewTab from '../utility/openNewTab';
   import { getDatabaseMenuItems } from './DatabaseAppObject.svelte';
   import getElectron from '../utility/getElectron';
-  import { getDatabaseList, useAllApps } from '../utility/metadataLoaders';
+  import { getDatabaseList, useAllApps, useServerVersion } from '../utility/metadataLoaders';
   import { getLocalStorage } from '../utility/storageCache';
   import { apiCall, removeVolatileMapping } from '../utility/api';
   import { closeMultipleTabs } from '../tabpanel/TabsPanel.svelte';
@@ -145,6 +145,18 @@
   import { getConnectionClickActionSetting } from '../settings/settingsTools';  import { isProApp } from '../utility/proTools';
   import { currentThemeType } from '../plugins/themes';
   import { getDriverIcon } from '../utility/driverIcons';
+  import { readable } from 'svelte/store';
+  import { isAiDisabled } from '../settings/settingsTools';
+
+  const MSSQL_ENGINE = 'mssql@dbgate-plugin-mssql';
+  const MSSQL_SERVER_CHAT_ENGINE_EDITIONS = [2, 3, 4, 8];
+
+  function isServerChatEditionSupported(engine, serverVersion) {
+    // MSSQL EngineEdition restricts server chat to Standard/Enterprise/Express/Managed Instance;
+    // other engines have no equivalent concept, so they are always eligible here.
+    if (engine !== MSSQL_ENGINE) return true;
+    return MSSQL_SERVER_CHAT_ENGINE_EDITIONS.includes(Number(serverVersion?.engineEdition));
+  }
 
   export let data;
   export let passProps;
@@ -156,6 +168,8 @@
   let engineStatusTitle = null;
   let driverIcon = null;
   let connectionIcon = null;
+  const emptyServerVersion = readable(null);
+  let serverVersionStore = emptyServerVersion;
 
   $: isPinned = data.singleDatabase && !!$pinnedDatabases.find(x => x?.connection?._id == data?._id);
 
@@ -253,9 +267,11 @@
 
   const getContextMenu = () => {
     const driver = $extensions.drivers.find(x => x.engine == data.engine);
+    const supportsNodejsDumper = driver?.supportsNodejsDumperForConnection?.(data) ?? true;
+    const supportsNodejsRestore = driver?.supportsNodejsRestore && supportsNodejsDumper;
     const supportsRestore = isProApp()
-      ? driver?.supportsNativeRestore || driver?.supportsNodejsRestore
-      : driver?.supportsNodejsRestore;
+      ? driver?.supportsNativeRestore || supportsNodejsRestore
+      : supportsNodejsRestore;
     const config = getCurrentConfig();
     const handleRefresh = () => {
       apiCall('server-connections/refresh', { conid: data._id });
@@ -315,6 +331,17 @@
         focused: true,
         props: {
           conid: data._id,
+        },
+      });
+    };
+    const handleServerChat = () => {
+      openNewTab({
+        title: 'Server Chat',
+        icon: 'img ai',
+        tabComponent: 'ServerChatTab',
+        props: {
+          conid: data._id,
+          serverLabel: getConnectionLabel(data),
         },
       });
     };
@@ -383,6 +410,19 @@
             text: _t('connection.newQuery', { defaultMessage: 'New Query (server)' }),
             isNewQuery: true,
           },
+          isProApp() &&
+            !isAiDisabled() &&
+            driver?.supportsServerSqlChat &&
+            $openedConnections.includes(data._id) &&
+            isServerChatEditionSupported(data.engine, $serverVersionStore) &&
+            hasPermission('dbops/chat') &&
+            hasPermission('dbops/query') &&
+            (!config.storageDatabase ||
+              (hasPermission('all-databases') && hasPermission('all-tables'))) && {
+              onClick: handleServerChat,
+              text: _t('connection.serverChat', { defaultMessage: 'Server Chat' }),
+              testid: 'ConnectionAppObject_serverChat',
+            },
           $openedConnections.includes(data._id) &&
             data.status && {
               text: _t('connection.refresh', { defaultMessage: 'Refresh' }),
@@ -455,6 +495,10 @@
 
   $: apps = useAllApps();
   $: driver = $extensions.drivers.find(x => x.engine == data.engine);
+  $: serverVersionStore =
+    driver?.supportsServerSqlChat && $openedConnections.includes(data._id)
+      ? useServerVersion({ conid: data._id })
+      : emptyServerVersion;
   $: driverIcon = getDriverIcon(driver, $currentThemeType);
   $: connectionIcon =
     driverIcon ||

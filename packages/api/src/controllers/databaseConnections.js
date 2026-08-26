@@ -50,6 +50,8 @@ const exportDbModelSql = require('../utility/exportDbModelSql');
 const axios = require('axios');
 const { callTextToSqlApi, callCompleteOnCursorApi, callRefactorSqlQueryApi } = require('../utility/authProxy');
 const { decryptConnection } = require('../utility/crypting');
+const platformInfo = require('../utility/platformInfo');
+const { checkSecureExportFilePath, writeExportFile, SecureExportWriteRefusedError } = require('../utility/security');
 const { getSshTunnel } = require('../utility/sshTunnel');
 const sessions = require('./sessions');
 const jsldata = require('./jsldata');
@@ -306,6 +308,11 @@ module.exports = {
     // }
     const res = await this.sendRequest(opened, { msgtype: 'queryData', sql });
     return res;
+  },
+
+  async queryServerChatData({ conid, database, sql }) {
+    const opened = await this.ensureOpened(conid, database);
+    return this.sendRequest(opened, { msgtype: 'serverChatQueryData', sql });
   },
 
   sqlSelect_meta: true,
@@ -936,13 +943,24 @@ module.exports = {
 
   generateDbDiffReport_meta: true,
   async generateDbDiffReport({ filePath, sourceConid, sourceDatabase, targetConid, targetDatabase }) {
+    if (!platformInfo.isElectron && !checkSecureExportFilePath(filePath)) {
+      logger.warn({ filePath }, 'DBGM-00000 Refused export write outside managed data directories');
+      return false;
+    }
+
     const unifiedDiff = await this.getUnifiedDiff({ sourceConid, sourceDatabase, targetConid, targetDatabase });
 
     const diffJson = parse(unifiedDiff);
     // $: diffHtml = html(diffJson, { outputFormat: 'side-by-side', drawFileList: false });
     const diffHtml = html(diffJson, { outputFormat: 'side-by-side' });
 
-    await fs.writeFile(filePath, diff2htmlPage(diffHtml));
+    try {
+      await writeExportFile(filePath, diff2htmlPage(diffHtml), { noFollow: !platformInfo.isElectron });
+    } catch (err) {
+      if (!(err instanceof SecureExportWriteRefusedError)) throw err;
+      logger.warn({ filePath }, 'DBGM-00000 Refused export write outside managed data directories');
+      return false;
+    }
 
     return true;
   },
@@ -1077,11 +1095,12 @@ module.exports = {
     const effectiveOptions = options || {};
     const effectiveSelectedTables = selectedTables || [];
     const effectiveSkippedTables = skippedTables || [];
+    const context = await this.getNativeOpContext(conid);
 
-    if (effectiveOptions.backupTool == 'dbgate-pg-dumper') {
-      const { connection, driver } = await this.getNativeOpContext(conid);
+    if (context.driver.supportsNodejsBackup && effectiveOptions.backupTool == context.driver.nodejsBackupTool) {
+      const { connection, driver } = context;
       if (!driver.supportsNodejsBackup || !driver.backupDatabase) {
-        throw new Error('DBGM-00251 The selected database driver does not support dbgate-pg-dumper');
+        throw new Error('DBGM-00000 The selected database driver does not support the requested JavaScript backup tool');
       }
       return runners.promiseRunCore(
         runid,
@@ -1127,8 +1146,9 @@ module.exports = {
 
   nativeBackupCommand_meta: true,
   async nativeBackupCommand({ conid, database, outputFile, options, selectedTables, skippedTables }) {
-    if (options?.backupTool == 'dbgate-pg-dumper') {
-      throw new Error('DBGM-00252 dbgate-pg-dumper runs inside DbGate and has no command line to copy');
+    const { driver } = await this.getNativeOpContext(conid);
+    if (driver.supportsNodejsBackup && options?.backupTool == driver.nodejsBackupTool) {
+      throw new Error('DBGM-00000 The selected JavaScript backup tool runs inside DbGate and has no command line to copy');
     }
 
     const commandArgs = await this.getNativeOpCommandArgs('backup', {
@@ -1159,10 +1179,11 @@ module.exports = {
     };
 
     try {
-      if (effectiveOptions.restoreTool == 'dbgate-pg-dumper') {
-        const { connection, driver } = await this.getNativeOpContext(conid);
+      const context = await this.getNativeOpContext(conid);
+      if (context.driver.supportsNodejsRestore && effectiveOptions.restoreTool == context.driver.nodejsRestoreTool) {
+        const { connection, driver } = context;
         if (!driver.supportsNodejsRestore || !driver.restoreDatabase) {
-          throw new Error('DBGM-00253 The selected database driver does not support dbgate-pg-dumper restore');
+          throw new Error('DBGM-00000 The selected database driver does not support the requested JavaScript restore tool');
         }
         return runners.promiseRunCore(
           runid,
@@ -1193,8 +1214,9 @@ module.exports = {
 
   nativeRestoreCommand_meta: true,
   async nativeRestoreCommand({ conid, database, inputFile, options }) {
-    if (options?.restoreTool == 'dbgate-pg-dumper') {
-      throw new Error('DBGM-00254 dbgate-pg-dumper runs inside DbGate and has no command line to copy');
+    const { driver } = await this.getNativeOpContext(conid);
+    if (driver.supportsNodejsRestore && options?.restoreTool == driver.nodejsRestoreTool) {
+      throw new Error('DBGM-00000 The selected JavaScript restore tool runs inside DbGate and has no command line to copy');
     }
 
     const commandArgs = await this.getNativeOpCommandArgs('restore', {
